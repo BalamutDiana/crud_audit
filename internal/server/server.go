@@ -1,38 +1,95 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"net"
+	"log"
 
 	audit "github.com/BalamutDiana/crud_audit/pkg/domain"
-	"google.golang.org/grpc"
+	"github.com/streadway/amqp"
 )
 
 type Server struct {
-	grpcSrv     *grpc.Server
-	auditServer audit.AuditServiceServer
+	auditServer *AuditServer
+	conn        *amqp.Connection
+	channel     *amqp.Channel
+	queue       amqp.Queue
 }
 
-func New(auditServer audit.AuditServiceServer) *Server {
+func New(auditServer *AuditServer, port int) *Server {
+	adr := fmt.Sprintf("amqp://guest:guest@localhost:%d/", port)
+	conn, err := amqp.Dial(adr)
+	if err != nil {
+		log.Fatal("failed to connect to rabbitmq")
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatal("failed to open a channel")
+	}
+
+	q, err := ch.QueueDeclare(
+		"audit_logs", // name
+		false,        // durable
+		false,        // delete when unused
+		false,        // exclusive
+		false,        // no-wait
+		nil,          // arguments
+	)
+	if err != nil {
+		log.Fatal("failed to declare a queue")
+	}
+
 	return &Server{
-		grpcSrv:     grpc.NewServer(),
+		conn:        conn,
+		channel:     ch,
+		queue:       q,
 		auditServer: auditServer,
 	}
 }
 
-func (s *Server) ListenAndServe(port int) error {
-	addr := fmt.Sprintf(":%d", port)
+func (s *Server) CloseConnection() error {
+	if err := s.conn.Close(); err != nil {
+		return err
+	}
+	if err := s.channel.Close(); err != nil {
+		return err
+	}
+	return nil
+}
 
-	lis, err := net.Listen("tcp", addr)
+func (s *Server) ListenAndServe() error {
+	msgs, err := s.channel.Consume(
+		s.queue.Name, // queue
+		"",           // consumer
+		true,         // auto-ack
+		false,        // exclusive
+		false,        // no-local
+		false,        // no-wait
+		nil,          // args
+	)
 	if err != nil {
-		return err
+		log.Fatal("failed to register a consumer")
 	}
 
-	audit.RegisterAuditServiceServer(s.grpcSrv, s.auditServer)
+	forever := make(chan bool)
 
-	if err := s.grpcSrv.Serve(lis); err != nil {
-		return err
-	}
+	go func() {
+		for d := range msgs {
+			log.Printf("Received a message: %s", d.Body)
+			var reqItem audit.LogItem
+			if err := json.Unmarshal(d.Body, &reqItem); err != nil {
+				log.Fatal("failed to unmarshal request")
+			}
+			if err := s.auditServer.service.Insert(context.TODO(), reqItem); err != nil {
+				log.Fatal("failed to insert item")
+			}
+		}
+	}()
+
+	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+	<-forever
 
 	return nil
 }

@@ -20,13 +20,7 @@ func NewAudit(repo Repository) *Audit {
 	}
 }
 
-func (s *Audit) Insert(ctx context.Context, req *audit.LogRequest) error {
-	item := audit.LogItem{
-		Action:    req.GetAction().String(),
-		Entity:    req.GetEntity().String(),
-		EntityID:  req.GetEntityId(),
-		Timestamp: req.GetTimestamp().AsTime(),
-	}
+func (s *Audit) Insert(ctx context.Context, req audit.LogItem) error {
 
-	return s.repo.Insert(ctx, item)
+	return s.repo.Insert(ctx, req)
 }
